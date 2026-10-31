@@ -3,7 +3,7 @@
    Entries are saved on the phone first, then sent to the Google Sheet in the background. */
 (function(){
 "use strict";
-const APP_VERSION = "2.0.0";   // raise this together with VERSION in sw.js whenever you change an app file
+const APP_VERSION = "2.1.0";   // raise this together with VERSION in sw.js whenever you change an app file
 
 /* ---------- Basics ---------- */
 const $ = s => document.querySelector(s);
@@ -236,7 +236,7 @@ const st = {};
 function resetDesk(keepKind){
   if (st.vrule && st.vheld) releaseVoucher(st.vrule.code);
   const kind = keepKind ? st.kind : "walkin", school = keepKind ? st.school : "private";
-  Object.assign(st, {kind, school, name:"", phone:"", heard:"", guests:0, under3:0, students:0, teachers:0, acts:{}, voucher:"", vrule:null, vstate:"", vmsg:"", vheld:false, voffline:false, note:""});
+  Object.assign(st, {kind, school, name:"", phone:"", heard:"", guests:0, under3:0, students:0, teachers:0, acts:{}, voucher:"", vrule:null, vstate:"", vmsg:"", vheld:false, voffline:false, vpending:false, vcheck:null, note:""});
   if (view === "desk" || !keepKind) renderDesk();
 }
 function actIcon(n){ n = n.toLowerCase();
@@ -359,7 +359,7 @@ function renderDesk(){
   if (config.activities.length){
     h += '<div class="card"><div class="card-h">'+LEAF+'<h2 class="brush">Activities</h2><span class="aside">Tap to add</span></div><div class="tiles" id="tiles">'+config.activities.map(tile).join("")+'</div><div id="comboBox"></div></div>';
   }
-  h += '<div class="card"><div class="card-h">'+LEAF+'<h2 class="brush">Voucher</h2><span class="aside">'+(k === "school" ? "School discount code, if any" : "Only if the guest has one")+'</span></div>'+voucherBox()+'</div>';
+  h += '<div class="card"><div class="card-h">'+LEAF+'<h2 class="brush">Voucher</h2><span class="aside">'+(k === "school" ? "School discount code, if any" : "Only if the guest has one")+'</span></div><div id="vBox">'+voucherBox()+'</div></div>';
   h += '<div class="card"><details class="more"'+(st.note?" open":"")+'><summary>Add a note</summary>'+
     '<div class="fields one" style="margin-top:10px"><label class="f"><span>Note</span><textarea class="inp" data-field="note" maxlength="300">'+esc(st.note)+'</textarea></label></div></details></div>';
   $("#v-desk").innerHTML = h;
@@ -376,10 +376,11 @@ function voucherBox(){
     '<button type="button" class="btn forest" data-vact="check"'+(busy?" disabled":"")+'>'+(busy?"Checking…":"Check")+'</button></div>'+
     '<p class="hint'+(st.vstate==="bad"?" warn":"")+'" id="vHint">'+esc(st.vmsg || "Type the code and tap Check. The discount is applied automatically.")+'</p>';
 }
+function paintVoucher(){ const b = $("#vBox"); if (b) b.innerHTML = voucherBox(); updatePay(); }
 function voucherHint(){
   const el = $("#vHint"); if (!el || !st.vrule) return;
   const c = calc(), v = st.vrule;
-  if (c.vApplied){ el.className = "hint ok"; el.textContent = "Applied. Saves "+money((c.free * c.entryFee + c.discount) * (1 + (config.gst||0)/100))+" including GST."+(st.voffline ? " Checked without internet: the sheet will confirm it when the entry sends." : ""); }
+  if (c.vApplied){ el.className = "hint ok"; el.textContent = "Applied. Saves "+money((c.free * c.entryFee + c.discount) * (1 + (config.gst||0)/100))+" including GST."+(st.vpending ? " Confirming with the sheet…" : st.voffline ? " Checked without internet: the sheet will confirm it when the entry sends." : ""); }
   else if (!c.vMeets){ el.className = "hint warn"; el.textContent = "Needs at least "+v.minGuests+(st.kind === "school" ? " students" : " guests aged 3+")+" to apply."; }
   else { el.className = "hint"; el.textContent = "Add guests to apply it."; }
 }
@@ -432,8 +433,12 @@ async function checkVoucher(){
   if (local){
     const res = evalVoucher(local, kind);
     if (!res.ok || !local.maxUses){ applyVoucherResult(res); return; }     // instant: no server call needed
+    // limited-use code: apply it now and let the sheet confirm (and hold it) in the background
+    applyVoucherResult(res, {vpending: true});
+    st.vcheck = confirmVoucher(code, kind);
+    return;
   }
-  // limited-use codes are confirmed (and held) by the sheet; unknown codes may be new or expired
+  // not in the phone's list: maybe added since the last sync, or expired, so ask the sheet
   st.vstate = "checking"; st.vmsg = ""; renderDesk();
   try {
     const res = await api("checkVoucher", session.token, code, kind, DEV);
@@ -443,6 +448,21 @@ async function checkVoucher(){
     if (err.offline && local) applyVoucherResult(evalVoucher(local, kind), {voffline: true});
     else applyVoucherResult({ok:false, reason: err.offline ? "No internet, and this code isn’t in the phone’s list. Try again when online, or continue without it." : err.message});
   }
+}
+// The sheet's answer for a voucher that is already applied on screen
+async function confirmVoucher(code, kind){
+  let res;
+  try { res = await api("checkVoucher", session.token, code, kind, DEV); }
+  catch(err){ if (expired(err)) return; res = err.offline ? {offline: true} : {ok: false, reason: err.message}; }
+  if (!(st.vrule && st.vrule.code === code && st.vpending)){ if (res.ok && res.maxUses) releaseVoucher(code); return; }   // removed meanwhile
+  if (res.offline) Object.assign(st, {vpending: false, voffline: true});
+  else if (res.ok) Object.assign(st, {vrule: res, vpending: false, vheld: !!res.maxUses});
+  else {
+    Object.assign(st, {vrule: null, vpending: false, vstate: "bad", vmsg: res.reason || "This voucher can’t be used."});
+    toast("Voucher removed: " + st.vmsg, true);
+  }
+  st.vcheck = null;
+  if (view === "desk") paintVoucher();
 }
 function updatePay(){
   if (!config) return;
@@ -542,8 +562,13 @@ function summaryLines(c){
   if (c.gst) L.push(["GST "+config.gst+"%", "+"+money(c.gst)]);
   return '<div class="lines">'+L.map(l => '<div><span>'+esc(l[0])+'</span><span>'+l[1]+'</span></div>').join("")+'</div>';
 }
-$("#pay").addEventListener("click", e => {
+$("#pay").addEventListener("click", async e => {
   const b = e.target.closest("[data-pay]"); if (!b) return;
+  if (st.vpending && st.vcheck){             // the sheet hasn't answered about the voucher yet: wait for it
+    b.disabled = true; b.textContent = "Checking voucher…";
+    await st.vcheck;
+    if (!st.vrule) return;                   // it was refused; the bill on screen has changed
+  }
   const c = calc(); if (!c.heads) return;
   if (!st.heard){ st.heardErr = true; const b = $("#heardBtn"); if (b){ b.classList.add("bad"); b.scrollIntoView({block:"center", behavior:"smooth"}); setTimeout(() => { const x = $("#heardBtn"); if (x && $("#heardPanel").hidden) x.click(); }, 350); } toast("Ask how they heard about us", true); return; }
   if (st.voucher.trim() && !st.vrule){ toast("Tap Check on the voucher, or clear the code", true); const v = $("#vCode"); if (v) v.focus(); return; }
