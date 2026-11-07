@@ -1,7 +1,7 @@
 /* Keeps the app's own files on the phone so it opens instantly, even without internet.
    Calls to Google (saving entries, sync) are never stored here.
    When you change any app file, raise the number in APP_VERSION in app.js and VERSION below. */
-const VERSION = "2.1.0";
+const VERSION = "2.4.0";
 const CACHE = "bop-shell-" + VERSION;
 const FONTS = "bop-fonts";
 const SHELL = ["./", "index.html", "app.js", "config.js", "manifest.webmanifest",

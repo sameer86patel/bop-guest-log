@@ -3,7 +3,7 @@
    Entries are saved on the phone first, then sent to the Google Sheet in the background. */
 (function(){
 "use strict";
-const APP_VERSION = "2.1.0";   // raise this together with VERSION in sw.js whenever you change an app file
+const APP_VERSION = "2.4.0";   // raise this together with VERSION in sw.js whenever you change an app file
 
 /* ---------- Basics ---------- */
 const $ = s => document.querySelector(s);
@@ -236,7 +236,7 @@ const st = {};
 function resetDesk(keepKind){
   if (st.vrule && st.vheld) releaseVoucher(st.vrule.code);
   const kind = keepKind ? st.kind : "walkin", school = keepKind ? st.school : "private";
-  Object.assign(st, {kind, school, name:"", phone:"", heard:"", guests:0, under3:0, students:0, teachers:0, acts:{}, voucher:"", vrule:null, vstate:"", vmsg:"", vheld:false, voffline:false, vpending:false, vcheck:null, note:""});
+  Object.assign(st, {kind, school, name:"", phone:"", heard:"", guests:0, under3:0, students:0, teachers:0, acts:{}, voucher:"", vrule:null, vstate:"", vmsg:"", vheld:false, voffline:false, vpending:false, vcheck:null, note:"", linkId:""});
   if (view === "desk" || !keepKind) renderDesk();
 }
 function actIcon(n){ n = n.toLowerCase();
@@ -288,10 +288,13 @@ function priceOf(p, cfg, r) {
 }
 
 function calc(){
-  if (!config) return {heads:0, nActs:0, total:0, combos:[]};
+  if (!config) return {heads:0, nActs:0, total:0, combos:[], ready:false};
   const p = priceOf(st, config, st.vrule);
   p.heads = st.kind === "school" ? st.students + st.teachers : st.guests + st.under3;
   p.nActs = Object.values(st.acts).reduce((s,n) => s+n, 0);
+  // a walk-in with activities but no guests: people who paid entry earlier and came back for activities
+  p.addon = st.kind === "walkin" && !p.heads && p.nActs > 0;
+  p.ready = p.heads > 0 || p.addon;   // something to charge for
   return p;
 }
 const plusGst = v => money(v) + (config.gst ? " + GST" : "");
@@ -311,8 +314,13 @@ function tile(a){
     (n ? '<span class="cnt">'+n+'</span><span class="minus" role="button" data-minus="'+esc(a.name)+'" aria-label="Remove one '+esc(a.name)+'">−</span>' : '')+'</button>';
 }
 function slotLabel(hm){ const p = String(hm).split(":").map(Number); return (p[0]%12||12)+":"+pad(p[1])+" "+(p[0]<12?"AM":"PM"); }
+// weekend times on Saturdays, Sundays and holidays (Weekend batch times in Settings), weekday times otherwise
+function todaysBatches(){
+  const d = new Date(), wk = d.getDay() === 0 || d.getDay() === 6 || !!(config.holidays || {})[ymd(d)];
+  return (wk && config.batchesWeekend && config.batchesWeekend.length) ? config.batchesWeekend : (config.batches || []);
+}
 function upcomingSlots(){
-  const all = config.batches || [];
+  const all = todaysBatches();
   if (!all.length) return {slots:[], over:false};
   const d = new Date(), nm = d.getHours()*60 + d.getMinutes();
   const i = all.findIndex(x => { const p = x.split(":").map(Number); return p[0]*60 + p[1] > nm; });
@@ -341,6 +349,7 @@ function renderDesk(){
   } else {
     h += '<div class="fields"><label class="f"><span>Name (optional)</span><input class="inp" data-field="name" value="'+esc(st.name)+'" autocomplete="off" autocapitalize="words"></label>'+
       '<label class="f"><span>Phone (optional)</span><input class="inp" data-field="phone" value="'+esc(st.phone)+'" inputmode="tel" autocomplete="off" maxlength="14"></label></div>';
+    if (st.linkId) h += '<p class="hint ok">Adding activities for '+esc(st.linkId)+' <button type="button" class="vrm" data-unlink>Cancel</button></p>';
   }
   h += '<div class="f dd" style="margin-top:10px"><span id="heardLbl">How did they hear about us? <em class="req">Required</em></span>'+
     '<button type="button" class="inp ddbtn'+(st.heardErr?" bad":"")+(st.heard?" set":"")+'" id="heardBtn" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="heardLbl heardBtn">'+esc(st.heard || "Choose one")+'</button>'+
@@ -469,7 +478,7 @@ function updatePay(){
   const c = calc();
   const parts = [];
   if (c.heads) parts.push(c.heads + (c.heads===1 ? " guest" : " guests"));
-  if (c.nActs) parts.push(c.nActs + (c.nActs===1 ? " activity" : " activities"));
+  if (c.nActs) parts.push(c.nActs + (c.nActs===1 ? " activity" : " activities") + (c.addon ? " only" : ""));
   if (c.combo) parts.push("combo applied");
   if (c.vApplied) parts.push("voucher applied");
   const cbx = $("#comboBox");
@@ -477,16 +486,17 @@ function updatePay(){
     const names = {}; c.combos.forEach(n => names[n] = (names[n]||0) + 1);
     const applied = Object.keys(names).sort((a,b) => b-a).map(n => (names[n] > 1 ? names[n]+" × " : "")+n+"-activity combo").join(" + ");
     let html = "";
+    if (c.addon) html += '<div class="combo"><b>Activities only, no entry fee</b><span>No guests added, so this is saved for guests who already paid entry and came back for activities.</span></div>';
     if (c.combo) html += '<div class="combo on"><b>🎉 '+esc(applied)+' applied</b><span>Guest saves '+money(c.combo * (1 + (config.gst||0)/100))+'</span></div>';
     const tier = c.comboNext && (config.combos||[]).find(t => t.n === c.comboNext.n);
     if (tier) html += '<div class="combo"><b>Add '+c.comboNext.more+' more '+(c.comboNext.more===1?"activity":"activities")+'</b><span>to get the '+tier.n+'-activity combo for '+comboPrice(tier)+'</span></div>';
     cbx.innerHTML = html;
   }
   let btns;
-  if (!c.heads) btns = '<button type="button" class="btn sun" disabled>Add guests to start</button>';
+  if (!c.ready) btns = '<button type="button" class="btn sun" disabled>'+"Add guests or activities"+'</button>';
   else if (c.total > 0) btns = config.modes.map((m,i) => '<button type="button" class="btn '+(i===0?"ghost":"sun")+'" data-pay="'+esc(m)+'">'+esc(m)+'</button>').join("");
   else btns = '<button type="button" class="btn forest" data-pay="">Save entry</button>';
-  document.body.classList.toggle("pay-on", c.heads > 0);   // bar shows only once something is added
+  document.body.classList.toggle("pay-on", c.ready);   // bar shows only once something is added
   $("#pay").innerHTML = '<div class="tot"><div class="amt">'+money(c.total)+'</div><small>'+(parts.join(", ") || "Nothing added yet")+'</small></div><div class="paybtns">'+btns+'</div>';
   voucherHint();
 }
@@ -499,6 +509,7 @@ desk.addEventListener("click", e => {
   const hb = e.target.closest("[data-heard]");
   if (hb){ st.heard = hb.dataset.heard; st.heardErr = false; const b = $("#heardBtn"); b.textContent = st.heard; b.classList.add("set"); b.classList.remove("bad");
     $("#heardPanel").querySelectorAll("[data-heard]").forEach(x => x.setAttribute("aria-selected", String(x === hb))); closeHeard(); b.focus(); return; }
+  if (e.target.closest("[data-unlink]")){ st.linkId = ""; renderDesk(); return; }
   const va = e.target.closest("[data-vact]");
   if (va){ if (va.dataset.vact === "check") checkVoucher(); else { if (st.vrule && st.vheld) releaseVoucher(st.vrule.code); Object.assign(st, {voucher:"", vrule:null, vstate:"", vmsg:"", vheld:false, voffline:false}); renderDesk(); } return; }
   const bb = e.target.closest("[data-batch]");
@@ -535,15 +546,16 @@ desk.addEventListener("focusin", e => { if (e.target.matches(".step input")) e.t
 function cleanPhone(p){ let d = String(p||"").replace(/\D/g,""); if (d.length === 12 && d.indexOf("91")===0) d = d.slice(2); return d; }
 function makeEntry(mode){
   const c = calc(), now = new Date();
-  const type = st.kind === "walkin" ? "Walk-in" : (st.school === "private" ? "School – private" : "School – government");
+  const add = c.addon;
+  const type = add ? "Activity only" : st.kind === "walkin" ? "Walk-in" : (st.school === "private" ? "School – private" : "School – government");
   const acts = {}; Object.keys(st.acts).forEach(n => { if (st.acts[n] > 0) acts[n] = st.acts[n]; });
   const sch = st.kind === "school";
-  return { id: nextId(now), ts: now.getTime(), date: ymd(now), time: clock(now), batch: st.batch ? slotLabel(st.batch) : "", heard: st.heard, type, name: st.name.trim(), phone: cleanPhone(st.phone),
-    guests: sch ? 0 : st.guests, under3: sch ? 0 : st.under3, students: sch ? st.students : 0, teachers: sch ? st.teachers : 0,
-    free: c.free, entryFee: c.entryFee, entryAmt: c.entryAmt, acts, actAmt: c.actAmt, combo: c.combo, comboLabel: comboName(c.combos), discount: c.discount, gst: c.gst, total: c.total,
+  return { id: nextId(now), ts: now.getTime(), date: ymd(now), time: clock(now), batch: st.batch ? slotLabel(st.batch) : "", heard: add ? "" : st.heard, type, name: st.name.trim(), phone: cleanPhone(st.phone),
+    guests: sch || add ? 0 : st.guests, under3: sch || add ? 0 : st.under3, students: sch ? st.students : 0, teachers: sch ? st.teachers : 0,
+    free: c.free, entryFee: add ? 0 : c.entryFee, entryAmt: c.entryAmt, acts, actAmt: c.actAmt, combo: c.combo, comboLabel: comboName(c.combos), discount: c.discount, gst: c.gst, total: c.total,
     mode: c.total > 0 ? mode : "Free",
     voucher: c.vApplied ? st.vrule.code : "", voucherLabel: c.vApplied ? st.vrule.label : "", voucherOffline: !!(c.vApplied && st.voffline),
-    note: st.note.trim(), by: session.name, dev: DEV, status: c.total > 0 ? "Paid" : "Recorded" };
+    note: [add && st.linkId.trim() ? "Add-on to " + st.linkId.trim().toUpperCase() : "", st.note.trim()].filter(Boolean).join(" | "), by: session.name, dev: DEV, status: c.total > 0 ? "Paid" : "Recorded" };
 }
 function summaryLines(c){
   const L = [];
@@ -554,7 +566,7 @@ function summaryLines(c){
     if (c.free) L.push([c.free+" free with code "+st.vrule.code, money(0)]);
     if (st.teachers) L.push([st.teachers+" teachers and staff"+(tf ? " × "+money(tf) : ""), tf ? money(st.teachers*tf) : "Free"]);
   }
-  else { L.push([(st.guests - c.free)+" × "+money(c.entryFee), money(c.entryAmt)]); if (c.free) L.push([c.free+" free with voucher "+st.vrule.code, money(0)]); }
+  else if (!c.addon) { L.push([(st.guests - c.free)+" × "+money(c.entryFee), money(c.entryAmt)]); if (c.free) L.push([c.free+" free with voucher "+st.vrule.code, money(0)]); }
   if (st.kind !== "school" && st.under3) L.push([st.under3+" under 3","Free"]);
   config.activities.forEach(a => { const n = st.acts[a.name]; if (n) L.push([n+" × "+a.name, money(n*a.price)]); });
   if (c.combo) L.push([comboName(c.combos), "−"+money(c.combo)]);
@@ -569,8 +581,8 @@ $("#pay").addEventListener("click", async e => {
     await st.vcheck;
     if (!st.vrule) return;                   // it was refused; the bill on screen has changed
   }
-  const c = calc(); if (!c.heads) return;
-  if (!st.heard){ st.heardErr = true; const b = $("#heardBtn"); if (b){ b.classList.add("bad"); b.scrollIntoView({block:"center", behavior:"smooth"}); setTimeout(() => { const x = $("#heardBtn"); if (x && $("#heardPanel").hidden) x.click(); }, 350); } toast("Ask how they heard about us", true); return; }
+  const c = calc(); if (!c.ready) return;
+  if (!st.heard && !c.addon){ st.heardErr = true; const b = $("#heardBtn"); if (b){ b.classList.add("bad"); b.scrollIntoView({block:"center", behavior:"smooth"}); setTimeout(() => { const x = $("#heardBtn"); if (x && $("#heardPanel").hidden) x.click(); }, 350); } toast("Ask how they heard about us", true); return; }
   if (st.voucher.trim() && !st.vrule){ toast("Tap Check on the voucher, or clear the code", true); const v = $("#vCode"); if (v) v.focus(); return; }
   if (!c.total){ finish(makeEntry("")); return; }
   const m = b.dataset.pay, cash = /cash/i.test(m);
@@ -584,7 +596,7 @@ function finish(entry){
   const title = !entry.total ? "Entry saved" : /cash/i.test(entry.mode) ? "Cash received" : entry.mode + " received";
   openSheet('<div class="done"><svg viewBox="0 0 84 84" aria-hidden="true"><circle cx="42" cy="42" r="40" fill="#F2B43C"/><path d="M26 43l11 11 21-23" fill="none" stroke="#1E4A2C" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/></svg>'+
     '<h2 class="brush">'+esc(title)+'</h2><div class="samt">'+money(entry.total)+'</div>'+
-    '<p><span class="bid">'+esc(entry.id)+'</span><br>'+h+(h===1?" guest":" guests")+(entry.name ? ", "+esc(entry.name) : "")+(entry.batch ? "<br>"+esc(entry.batch)+" batch" : "")+'</p>'+
+    '<p><span class="bid">'+esc(entry.id)+'</span><br>'+(h ? h+(h===1?" guest":" guests") : "Activities only")+(entry.name ? ", "+esc(entry.name) : "")+(entry.batch ? "<br>"+esc(entry.batch)+" batch" : "")+'</p>'+
     '<button type="button" class="btn forest wide" data-act="next">Next guest</button></div>');
   st.vheld = false;               // the sheet releases the hold when the entry arrives
   resetDesk(true); flush();
@@ -611,6 +623,11 @@ $("#sheet").addEventListener("click", async e => {
     if (fresh){ toast("Updating the app…"); setTimeout(() => location.reload(), 1200); }
     else { closeSheet(); toast(navigator.onLine ? "Everything is up to date" : "No internet. Try again when online.", !navigator.onLine); }
   }
+  else if (a === "addon"){
+    closeSheet(); resetDesk();
+    Object.assign(st, {kind: "walkin", linkId: b.dataset.id, name: /school|walk-in/i.test(b.dataset.name) ? "" : (b.dataset.name || "")});
+    show("desk"); renderDesk(); toast("Add the activities, then take payment");
+  }
   else if (a === "drop"){ queue = queue.filter(x => x.id !== b.dataset.id); saveQueue(); closeSheet(); renderToday(); toast("Entry removed"); }
   else if (a === "askvoid"){ $("#voidBox").hidden = false; b.hidden = true; $("#voidReason").focus(); }
   else if (a === "dovoid"){
@@ -627,7 +644,8 @@ let todayData = null, todayList = [];
 function describe(o){
   const parts = [];
   if (o.batch) parts.push(o.batch+" batch");
-  if (/school/i.test(o.type)) parts.push((o.name || "School")+", "+o.students+" students"+(o.teachers ? " + "+o.teachers+" staff" : ""));
+  if (/activity only/i.test(o.type)) parts.push(o.name || "Activities only");
+  else if (/school/i.test(o.type)) parts.push((o.name || "School")+", "+o.students+" students"+(o.teachers ? " + "+o.teachers+" staff" : ""));
   else { parts.push((o.name || o.type)+", "+(o.guests + o.under3)+(o.guests + o.under3 === 1 ? " guest" : " guests")); }
   const a = Object.keys(o.acts||{}).map(n => n+(o.acts[n]>1 ? " ×"+o.acts[n] : ""));
   if (a.length) parts.push(a.join(", "));
@@ -666,9 +684,9 @@ function renderToday(){
   // head counts: server summary covers all of today; add entries still on this phone
   const sum = ok && todayData.summary ? JSON.parse(JSON.stringify(todayData.summary)) : {guests:0, entries:0, acts:{}, batches:{}};
   pend.filter(o => !/void/i.test(o.status)).forEach(o => {
-    const h = heads(o); sum.guests += h; sum.entries++;
+    const h = heads(o); sum.guests += h; if (h) sum.entries++;
     Object.keys(o.acts||{}).forEach(n => sum.acts[n] = (sum.acts[n]||0) + o.acts[n]);
-    if (o.batch){ sum.batches[o.batch] = (sum.batches[o.batch]||0) + h; sum.bd = sum.bd || {}; const b = sum.bd[o.batch] || (sum.bd[o.batch] = {g:0, e:0, acts:{}}); b.g += h; b.e++; Object.keys(o.acts||{}).forEach(n => b.acts[n] = (b.acts[n]||0) + o.acts[n]); }
+    if (o.batch){ sum.batches[o.batch] = (sum.batches[o.batch]||0) + h; sum.bd = sum.bd || {}; const b = sum.bd[o.batch] || (sum.bd[o.batch] = {g:0, e:0, acts:{}}); b.g += h; if (h) b.e++; Object.keys(o.acts||{}).forEach(n => b.acts[n] = (b.acts[n]||0) + o.acts[n]); }
   });
   const nActs = Object.values(sum.acts).reduce((s,n) => s+n, 0);
   const hol = ((config && config.holidays)||{})[t], dow = new Date().getDay();
@@ -697,7 +715,7 @@ function renderToday(){
   todayList.forEach((o,i) => {
     h += '<button type="button" class="entry'+(/void/i.test(o.status)?" void":"")+'" data-i="'+i+'"><time>'+esc(o.time)+'</time>'+
       '<span class="what"><b>'+esc(o.id)+'</b><small>'+esc(describe(o))+'</small></span>'+
-      '<span class="money">'+(admin ? '<b>'+money(o.total)+'</b>' : '<b>'+heads(o)+(heads(o)===1?" guest":" guests")+'</b>')+tagFor(o)+'</span></button>';
+      '<span class="money">'+(admin ? '<b>'+money(o.total)+'</b>' : '<b>'+(heads(o) ? heads(o)+(heads(o)===1?" guest":" guests") : "Add-on")+'</b>')+tagFor(o)+'</span></button>';
   });
   h += '</div></div>';
   $("#v-today").innerHTML = h;
@@ -724,6 +742,9 @@ $("#v-today").addEventListener("click", e => {
   else if (!/void/i.test(o.status)) act = '<button type="button" class="btn danger" data-act="askvoid">Void entry</button>'+
     '<div id="voidBox" hidden><label class="f"><span>Why are you voiding it?</span><input class="inp" id="voidReason" maxlength="120" placeholder="e.g. Entered twice"></label>'+
     '<div class="actions"><button type="button" class="btn danger" data-act="dovoid" data-id="'+esc(o.id)+'">Void entry</button></div></div>';
+  // guests who come back later for activities: start an activity-only sale linked to this booking
+  if (!o.pending && !/void/i.test(o.status) && !/activity only/i.test(o.type))
+    act = '<button type="button" class="btn sun" data-act="addon" data-id="'+esc(o.id)+'" data-name="'+esc(o.name)+'">Add activities for this group</button>' + act;
   openSheet('<h2 class="brush">'+esc(o.id)+'</h2>'+(admin ? '<div class="samt">'+money(o.total)+'</div>' : '')+
     '<div class="lines">'+L.map(l => '<div><span>'+esc(l[0])+'</span><span>'+esc(l[1])+'</span></div>').join("")+'</div>'+
     '<div class="actions">'+act+'<button type="button" class="btn ghost" data-act="close">Close</button></div>');
